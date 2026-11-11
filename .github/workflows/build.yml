@@ -29,12 +29,12 @@ on:
           - rootless
       twitter_branding:
         description: "Set app name to Twitter (IPA builds only)"
-        default: true
+        default: false
         required: false
         type: boolean
       resource_pack_url:
         description: "Override app icons (.ZIP) (IPA builds only)"
-        default: "https://files.catbox.moe/p63f20.zip"
+        default: ""
         required: false
         type: string
       commit_id:
