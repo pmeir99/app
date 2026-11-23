@@ -6,6 +6,7 @@ on:
     branches: [v7]
 
 permissions:
+  actions: write
   contents: write
 
 concurrency:
@@ -13,63 +14,74 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  tests:
-    name: Tests on ${{ matrix.runner }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [macos-26, macos-26-intel, xcode-27]
-
+  race:
+    if: github.event_name == 'push'
+    name: Dispatch and monitor first compatible runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 370
     steps:
-      # Race compatible macOS runners and let the first one perform the suite.
-      - name: Claim first available runner
-        id: claim
+      - name: Dispatch candidates, cancel the losers, and monitor the winner
         uses: actions/github-script@v8
         with:
           script: |
-            const ref = `heads/ci-runner-race/tests-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
-            try {
-              await github.rest.git.createRef({ ...context.repo, ref: 'refs/' + ref, sha: context.sha });
-              core.setOutput('winner', 'true');
-            } catch (error) {
-              if (error.status !== 422 || !/reference already exists/i.test(error.message)) throw error;
-              core.info('Another compatible runner claimed the test run.');
-              core.setOutput('winner', 'false');
-            }
+            const raceId = `${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
+            const branch = context.ref.replace(/^refs\/heads\//, '');
+            const runners = ['macos-26', 'macos-26-intel', 'xcode-27'];
+            await Promise.all(runners.map(runner =>
+              github.rest.actions.createWorkflowDispatch({
+                ...context.repo,
+                workflow_id: 'runner-race-candidate.yml',
+                ref: branch,
+                inputs: {
+                  race_id: raceId,
+                  runner,
+                  purpose: 'tests',
+                  coordinator_run_id: String(context.runId)
+                }
+              })
+            ));
 
+            const prefix = `RR-${raceId}-`;
+            const deadline = Date.now() + 6 * 60 * 60 * 1000;
+            while (Date.now() < deadline) {
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                ...context.repo,
+                workflow_id: 'runner-race-candidate.yml',
+                branch,
+                event: 'workflow_dispatch',
+                per_page: 100
+              });
+              const candidates = data.workflow_runs.filter(run => run.display_title.startsWith(prefix));
+              const finished = candidates.find(run =>
+                run.status === 'completed' && ['success', 'failure'].includes(run.conclusion)
+              );
+              if (finished) {
+                core.info(`Winner run: ${finished.html_url}`);
+                if (finished.conclusion === 'failure') core.setFailed(`Winner runner failed: ${finished.html_url}`);
+                return;
+              }
+              await new Promise(resolve => setTimeout(resolve, 10000));
+            }
+            core.setFailed('Timed out waiting for the winning runner workflow.');
+
+  pull-request-tests:
+    if: github.event_name == 'pull_request'
+    name: Pull request tests
+    runs-on: macos-26-intel
+    timeout-minutes: 60
+    steps:
       - name: Checkout repository
-        if: steps.claim.outputs.winner == 'true'
         uses: actions/checkout@v6
         with:
           path: main
           submodules: recursive
           persist-credentials: false
-
       - name: Run Localization Tests
-        if: steps.claim.outputs.winner == 'true'
         uses: ./main/.github/actions/test-localization
-
       - name: Run Formatting Tests
-        if: steps.claim.outputs.winner == 'true'
         uses: ./main/.github/actions/test-formatting
-
       - name: Run Build Tests
-        if: steps.claim.outputs.winner == 'true'
         uses: ./main/.github/actions/test-build
         env:
           THEOS: ${{ github.workspace }}/theos
           BUILD_DIR: ${{ github.workspace }}/ffmpeg-build
-
-      - name: Release runner claim
-        if: always() && steps.claim.outputs.winner == 'true'
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const ref = `heads/ci-runner-race/tests-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
-            try {
-              await github.rest.git.deleteRef({ ...context.repo, ref });
-            } catch (error) {
-              if (error.status !== 422 || !/reference does not exist/i.test(error.message)) throw error;
-            }
