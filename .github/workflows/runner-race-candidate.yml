@@ -285,6 +285,7 @@ jobs:
         env:
           TWITTER_BRANDING: ${{ inputs.twitter_branding }}
           DEPLOY_FORMAT: ${{ inputs.deploy_format }}
+          X_VERSION: ${{ steps.x_version.outputs.version }}
 
       - name: Upload Artifact
         if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build' && inputs.upload_artifact
