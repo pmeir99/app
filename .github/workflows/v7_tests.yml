@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: v7-tests-${{ github.ref }}
+  group: v7-tests-${{ github.ref }}-${{ github.run_id }}
   cancel-in-progress: true
 
 jobs:
