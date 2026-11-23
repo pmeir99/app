@@ -123,6 +123,8 @@ jobs:
       - name: Cancel all other queued or running candidates
         if: steps.claim.outputs.winner == 'true'
         uses: actions/github-script@v8
+        env:
+          COORDINATOR_RUN_ID: ${{ inputs.coordinator_run_id }}
         with:
           script: |
             const racePrefix = `RR-${{ inputs.race_id }}-`;
@@ -164,9 +166,8 @@ jobs:
               per_page: 100
             });
             for (const run of allRuns.workflow_runs) {
-              const match = run.display_title.match(/^RR-(\\d+)-(\\d+)-/);
-              if (!match || Number(match[1]) === context.payload.inputs.coordinator_run_id || run.status === 'completed') continue;
-              const parentId = Number(match[1]);
+              const parentId = Number(run.display_title.split('-')[1]);
+              if (!Number.isFinite(parentId) || parentId === Number(process.env.COORDINATOR_RUN_ID) || run.status === 'completed') continue;
               const { data: parent } = await github.rest.actions.getWorkflowRun({
                 ...context.repo,
                 run_id: parentId
