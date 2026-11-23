@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-latest, macos-15, macos-26, xcode-27, macos-15-intel, macos-26-intel]
+        runner: [macos-26, macos-26-intel, xcode-27]
 
     steps:
       # Race compatible macOS runners and let the first one perform the suite.
