@@ -76,6 +76,13 @@ jobs:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 360
     steps:
+      - name: Export cache service credentials
+        uses: actions/github-script@v8
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL);
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN);
+
       - name: Claim runner race atomically
         id: claim
         run: |
@@ -144,6 +151,31 @@ jobs:
                 await github.rest.actions.cancelWorkflowRun({
                   ...context.repo,
                   run_id: peer.id
+                });
+              }
+            }
+
+            // Clean up candidates orphaned when an older coordinator was cancelled.
+            const { data: allRuns } = await github.rest.actions.listWorkflowRuns({
+              ...context.repo,
+              workflow_id: 'runner-race-candidate.yml',
+              branch,
+              event: 'workflow_dispatch',
+              per_page: 100
+            });
+            for (const run of allRuns.workflow_runs) {
+              const match = run.display_title.match(/^RR-(\\d+)-(\\d+)-/);
+              if (!match || Number(match[1]) === context.payload.inputs.coordinator_run_id || run.status === 'completed') continue;
+              const parentId = Number(match[1]);
+              const { data: parent } = await github.rest.actions.getWorkflowRun({
+                ...context.repo,
+                run_id: parentId
+              });
+              if (parent.status === 'completed' && parent.conclusion === 'cancelled') {
+                core.info(`Cancelling orphaned candidate ${run.display_title}.`);
+                await github.rest.actions.cancelWorkflowRun({
+                  ...context.repo,
+                  run_id: run.id
                 });
               }
             }
