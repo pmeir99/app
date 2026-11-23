@@ -81,35 +81,6 @@ jobs:
           script: |
             const raceId = `${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
             const branch = context.ref.replace(/^refs\/heads\//, '');
-            const { data: oldRuns } = await github.rest.actions.listWorkflowRuns({
-              ...context.repo,
-              workflow_id: 'runner-race-candidate.yml',
-              branch,
-              event: 'workflow_dispatch',
-              per_page: 100
-            });
-            const activeOldRuns = oldRuns.workflow_runs.filter(run =>
-              run.display_title.startsWith('RR-') && run.status !== 'completed'
-            );
-            const oldParentIds = [...new Set(activeOldRuns.map(run =>
-              Number(run.display_title.split('-')[1])
-            ).filter(id => Number.isFinite(id) && id !== context.runId))];
-            const parentResults = await Promise.all(oldParentIds.map(async run_id => {
-              try {
-                const { data } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id });
-                return [run_id, data.status === 'completed' && data.conclusion === 'cancelled'];
-              } catch (error) {
-                core.warning(`Could not inspect old coordinator ${run_id}: ${error.message}`);
-                return [run_id, false];
-              }
-            }));
-            const cancelledParents = new Set(parentResults.filter(([, cancelled]) => cancelled).map(([id]) => id));
-            await Promise.all(activeOldRuns.filter(run =>
-              cancelledParents.has(Number(run.display_title.split('-')[1]))
-            ).map(run => {
-              core.info(`Cancelling orphaned candidate ${run.display_title}.`);
-              return github.rest.actions.cancelWorkflowRun({ ...context.repo, run_id: run.id });
-            }));
             const runners = ['macos-26', 'macos-26-intel', 'xcode-27'];
             const candidateInputs = runner => ({
               race_id: raceId,
@@ -157,25 +128,3 @@ jobs:
               await new Promise(resolve => setTimeout(resolve, 10000));
             }
             core.setFailed('Timed out waiting for the winning build runner.');
-
-      - name: Cancel candidate runs if coordinator stops
-        if: always() && (cancelled() || failure())
-        uses: actions/github-script@v8
-        env:
-          RACE_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-        with:
-          script: |
-            const prefix = `RR-${process.env.RACE_ID}-`;
-            const branch = context.ref.replace(/^refs\\/heads\\//, '');
-            const { data } = await github.rest.actions.listWorkflowRuns({
-              ...context.repo,
-              workflow_id: 'runner-race-candidate.yml',
-              branch,
-              event: 'workflow_dispatch',
-              per_page: 100
-            });
-            for (const run of data.workflow_runs) {
-              if (run.display_title.startsWith(prefix) && run.status !== 'completed') {
-                await github.rest.actions.cancelWorkflowRun({ ...context.repo, run_id: run.id });
-              }
-            }
