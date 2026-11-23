@@ -6,44 +6,70 @@ on:
     branches: [v7]
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: v7-tests-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   tests:
-    name: ${{ matrix.name }}
-    runs-on: macos-latest
+    name: Tests on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - check: localization
-            name: Localization
-          - check: formatting
-            name: Formatting
-          - check: build
-            name: Build
+        runner: [macos-latest, macos-15, macos-26, xcode-27, macos-15-intel, macos-26-intel]
 
     steps:
-      # Each matrix job checks out the same workflow commit on its own runner.
+      # Race compatible macOS runners and let the first one perform the suite.
+      - name: Claim first available runner
+        id: claim
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const ref = `heads/ci-runner-race/tests-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
+            try {
+              await github.rest.git.createRef({ ...context.repo, ref: 'refs/' + ref, sha: context.sha });
+              core.setOutput('winner', 'true');
+            } catch (error) {
+              if (error.status !== 422 || !/reference already exists/i.test(error.message)) throw error;
+              core.info('Another compatible runner claimed the test run.');
+              core.setOutput('winner', 'false');
+            }
+
       - name: Checkout repository
+        if: steps.claim.outputs.winner == 'true'
         uses: actions/checkout@v6
         with:
           path: main
-          submodules: ${{ matrix.check == 'build' && 'recursive' || 'false' }}
+          submodules: recursive
           persist-credentials: false
 
       - name: Run Localization Tests
-        if: matrix.check == 'localization'
+        if: steps.claim.outputs.winner == 'true'
         uses: ./main/.github/actions/test-localization
 
       - name: Run Formatting Tests
-        if: matrix.check == 'formatting'
+        if: steps.claim.outputs.winner == 'true'
         uses: ./main/.github/actions/test-formatting
 
       - name: Run Build Tests
-        if: matrix.check == 'build'
+        if: steps.claim.outputs.winner == 'true'
         uses: ./main/.github/actions/test-build
         env:
           THEOS: ${{ github.workspace }}/theos
           BUILD_DIR: ${{ github.workspace }}/ffmpeg-build
+
+      - name: Release runner claim
+        if: always() && steps.claim.outputs.winner == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const ref = `heads/ci-runner-race/tests-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
+            try {
+              await github.rest.git.deleteRef({ ...context.repo, ref });
+            } catch (error) {
+              if (error.status !== 422 || !/reference does not exist/i.test(error.message)) throw error;
+            }
