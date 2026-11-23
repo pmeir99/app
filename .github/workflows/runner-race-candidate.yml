@@ -161,6 +161,15 @@ jobs:
           THEOS: ${{ github.workspace }}/theos
           BUILD_DIR: ${{ github.workspace }}/ffmpeg-build
 
+      - name: Get Tweak Info
+        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build'
+        id: tweak_info
+        run: |
+          TWEAK_NAME=$(sed -n 's/^Name: *//p' main/control)
+          TWEAK_VERSION=$(awk '/Version:/ {print $2}' main/control)
+          echo "name=${TWEAK_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version=${TWEAK_VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Install Dependencies
         if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build'
         run: brew install make dpkg ldid
@@ -207,12 +216,13 @@ jobs:
 
       - name: Prepare X IPA
         if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore')
+        id: x_version
         run: |
           mkdir -p main/packages main/tmp
           wget "$IPA_URL" --no-verbose -O main/packages/com.atebits.Tweetie2.ipa
           unzip -q main/packages/com.atebits.Tweetie2.ipa -d main/tmp
           X_VERSION=$(grep -A 1 '<key>CFBundleShortVersionString</key>' main/tmp/Payload/Twitter.app/Info.plist | grep '<string>' | awk -F'[><]' '{print $3}')
-          echo "X_VERSION=$X_VERSION" >> "$GITHUB_ENV"
+          echo "version=$X_VERSION" >> "$GITHUB_OUTPUT"
         env:
           IPA_URL: ${{ inputs.decrypted_ipa_url }}
 
@@ -267,8 +277,8 @@ jobs:
         run: |
           TWEAK_NAME=$(sed -n 's/^Name: *//p' main/control)
           TWEAK_VERSION=$(awk '/Version:/ {print $2}' main/control)
-          BRANDING=x
-          if [[ "$TWITTER_BRANDING" == "true" ]]; then BRANDING=twitter; fi
+          BRANDING=X
+          if [[ "$TWITTER_BRANDING" == "true" ]]; then BRANDING=Twitter; fi
           IPA_EXT=ipa
           if [[ "$DEPLOY_FORMAT" == "trollstore" ]]; then IPA_EXT=tipa; fi
           mv "main/packages/$(ls -t main/packages | head -n1)" "main/packages/${TWEAK_NAME}-${BRANDING}-${DEPLOY_FORMAT}_${TWEAK_VERSION}_${X_VERSION}.${IPA_EXT}"
@@ -280,7 +290,7 @@ jobs:
         if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build' && inputs.upload_artifact
         uses: actions/upload-artifact@v7
         with:
-          name: NeoFreeBird-${{ inputs.deploy_format }}
+          name: ${{ steps.tweak_info.outputs.name }}_${{ steps.tweak_info.outputs.version }}
           path: main/packages/*
           archive: false
           if-no-files-found: error
@@ -291,8 +301,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v${{ github.run_number }}
-          name: v${{ github.run_number }}
+          tag_name: v${{ steps.tweak_info.outputs.version }}
+          name: v${{ steps.tweak_info.outputs.version }}
           draft: true
           files: main/packages/*
 
