@@ -76,24 +76,33 @@ jobs:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 360
     steps:
-      - name: Claim runner race
+      - name: Prepare runner race claim
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/runner-race"
+          printf '%s\\n' "${{ inputs.race_id }}" > "$RUNNER_TEMP/runner-race/claim"
+
+      - name: Reserve the runner race claim
         id: claim
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/runner-race/claim
+          key: runner-race-${{ inputs.race_id }}
+
+      - name: Record whether this runner won
+        id: claim-result
         uses: actions/github-script@v8
+        env:
+          CLAIM_OUTCOME: ${{ steps.claim.outcome }}
         with:
           script: |
-            const ref = `heads/ci-runner-race/${{ inputs.race_id }}`;
-            try {
-              await github.rest.git.createRef({ ...context.repo, ref: 'refs/' + ref, sha: context.sha });
-              core.setOutput('winner', 'true');
-              core.info('This runner won the race.');
-            } catch (error) {
-              if (error.status !== 422 || !/reference already exists/i.test(error.message)) throw error;
-              core.setOutput('winner', 'false');
-              core.info('Another runner already won; cancelling this candidate run.');
-            }
+            const winner = process.env.CLAIM_OUTCOME === 'success';
+            core.setOutput('winner', String(winner));
+            core.info(winner ? 'This runner reserved the claim.' : 'Another runner already reserved the claim.');
 
       - name: Cancel this losing candidate
-        if: steps.claim.outputs.winner != 'true'
+        if: steps.claim-result.outputs.winner != 'true'
         uses: actions/github-script@v8
         with:
           script: |
@@ -103,7 +112,7 @@ jobs:
             });
 
       - name: Cancel all other queued or running candidates
-        if: steps.claim.outputs.winner == 'true'
+        if: steps.claim-result.outputs.winner == 'true'
         uses: actions/github-script@v8
         with:
           script: |
@@ -138,7 +147,7 @@ jobs:
             }
 
       - name: Checkout source
-        if: steps.claim.outputs.winner == 'true'
+        if: steps.claim-result.outputs.winner == 'true'
         uses: actions/checkout@v6
         with:
           path: main
@@ -147,22 +156,22 @@ jobs:
           persist-credentials: false
 
       - name: Run Localization Tests
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'tests'
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'tests'
         uses: ./main/.github/actions/test-localization
 
       - name: Run Formatting Tests
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'tests'
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'tests'
         uses: ./main/.github/actions/test-formatting
 
       - name: Run Build Tests
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'tests'
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'tests'
         uses: ./main/.github/actions/test-build
         env:
           THEOS: ${{ github.workspace }}/theos
           BUILD_DIR: ${{ github.workspace }}/ffmpeg-build
 
       - name: Get Tweak Info
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build'
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build'
         id: tweak_info
         run: |
           TWEAK_NAME=$(sed -n 's/^Name: *//p' main/control)
@@ -171,15 +180,15 @@ jobs:
           echo "version=${TWEAK_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Install Dependencies
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build'
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build'
         run: brew install make dpkg ldid
 
       - name: Add GNU Make to PATH
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build'
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build'
         run: echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
 
       - name: Download Theos
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build'
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build'
         uses: actions/checkout@v6
         with:
           repository: theos/theos
@@ -188,18 +197,18 @@ jobs:
           submodules: recursive
 
       - name: Install cyan
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore')
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore')
         run: pip install https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
 
       - name: Cache iOS SDK
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build'
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build'
         uses: actions/cache@v6
         with:
           path: theos/sdks/
           key: iOS-${{ inputs.sdk_version }}-SDK
 
       - name: Ensure iOS SDK is installed
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build'
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build'
         run: |
           if [[ ! -d "${THEOS}/sdks/iPhoneOS${SDK_VERSION}.sdk" ]]; then
             git clone -n --depth=1 --filter=tree:0 https://github.com/xybp888/iOS-SDKs sdks
@@ -215,7 +224,7 @@ jobs:
           SDK_VERSION: ${{ inputs.sdk_version }}
 
       - name: Prepare X IPA
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore')
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore')
         id: x_version
         run: |
           mkdir -p main/packages main/tmp
@@ -227,18 +236,18 @@ jobs:
           IPA_URL: ${{ inputs.decrypted_ipa_url }}
 
       - name: Prepare Image Pack
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build' && inputs.resource_pack_url != '' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore')
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build' && inputs.resource_pack_url != '' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore')
         run: wget "$IMAGE_URL" --no-verbose -O main/resource-pack.zip
         env:
           IMAGE_URL: ${{ inputs.resource_pack_url }}
 
       - name: Compute ffmpeg Cache Key
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build'
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build'
         id: ffmpeg-key
         run: echo "key=ffmpeg-stack-${{ runner.arch }}-sdk$(xcrun --sdk iphoneos --show-sdk-version)-$(git -C main rev-parse --short HEAD:deps/ffmpeg-kit-next/upstream)-${{ hashFiles('main/deps/ffmpeg-kit-next/build-ffmpeg.sh') }}" >> "$GITHUB_OUTPUT"
 
       - name: Cache ffmpeg Stack
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build'
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build'
         uses: actions/cache@v6
         with:
           path: |
@@ -247,7 +256,7 @@ jobs:
           key: ${{ steps.ffmpeg-key.outputs.key }}
 
       - name: Build Package
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build'
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build'
         run: |
           cd main
           for makefile in Makefile deps/flex/Makefile deps/CallessKit/Makefile deps/zxPluginsInject/upstream/Makefile; do
@@ -265,7 +274,7 @@ jobs:
           DEPLOY_FORMAT: ${{ inputs.deploy_format }}
 
       - name: Rebrand IPA
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore') && (inputs.twitter_branding || inputs.resource_pack_url != '')
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore') && (inputs.twitter_branding || inputs.resource_pack_url != '')
         run: |
           cd main
           IMAGE_FLAG=""
@@ -273,7 +282,7 @@ jobs:
           ./rebrand.sh${{ inputs.twitter_branding && ' --twitter-branding' || '' }} $IMAGE_FLAG "packages/$(ls -t packages | head -n1)"
 
       - name: Rename IPA
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore')
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore')
         run: |
           TWEAK_NAME=$(sed -n 's/^Name: *//p' main/control)
           TWEAK_VERSION=$(awk '/Version:/ {print $2}' main/control)
@@ -288,7 +297,7 @@ jobs:
           X_VERSION: ${{ steps.x_version.outputs.version }}
 
       - name: Upload Artifact
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build' && inputs.upload_artifact
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build' && inputs.upload_artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.tweak_info.outputs.name }}_${{ steps.tweak_info.outputs.version }}
@@ -297,7 +306,7 @@ jobs:
           if-no-files-found: error
 
       - name: Create Draft Release
-        if: steps.claim.outputs.winner == 'true' && inputs.purpose == 'build' && inputs.create_release
+        if: steps.claim-result.outputs.winner == 'true' && inputs.purpose == 'build' && inputs.create_release
         uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -308,7 +317,7 @@ jobs:
           files: main/packages/*
 
       - name: Release runner claim
-        if: always() && steps.claim.outputs.winner == 'true'
+        if: always() && steps.claim-result.outputs.winner == 'true'
         uses: actions/github-script@v8
         with:
           script: |
