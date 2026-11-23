@@ -59,13 +59,33 @@ concurrency:
 
 jobs:
   build:
-    name: Build Tweak
-    runs-on: macos-latest
+    name: Build Tweak on ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-latest, macos-15, macos-26, xcode-27, macos-15-intel, macos-26-intel]
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
 
     steps:
+      - name: Claim this build
+        id: claim
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const ref = `heads/ci-runner-race/${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
+            try {
+              await github.rest.git.createRef({ ...context.repo, ref: 'refs/' + ref, sha: context.sha });
+              core.setOutput('winner', 'true');
+            } catch (error) {
+              if (error.status !== 422 || !/reference already exists/i.test(error.message)) throw error;
+              core.info('Another runner claimed the build.');
+              core.setOutput('winner', 'false');
+            }
+
       - name: Checkout Main
+        if: steps.claim.outputs.winner == 'true'
         uses: actions/checkout@v6
         with:
           path: main
@@ -73,13 +93,16 @@ jobs:
           submodules: recursive
 
       - name: Install Dependencies
+        if: steps.claim.outputs.winner == 'true'
         run: brew install make dpkg ldid
 
       - name: Add GNU Make to PATH
+        if: steps.claim.outputs.winner == 'true'
         run: |
           echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
 
       - name: Download Theos
+        if: steps.claim.outputs.winner == 'true'
         uses: actions/checkout@v6
         with:
           repository: theos/theos
@@ -88,10 +111,11 @@ jobs:
           submodules: recursive
 
       - name: Install cyan
-        if: inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore'
+        if: steps.claim.outputs.winner == 'true' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore')
         run: pip install https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
 
       - name: iOS SDK Caching
+        if: steps.claim.outputs.winner == 'true'
         id: SDK
         uses: actions/cache@v6
         env:
@@ -102,6 +126,7 @@ jobs:
           restore-keys: ${{ env.cache-name }}
 
       - name: Ensure iOS SDK is installed
+        if: steps.claim.outputs.winner == 'true'
         run: |
           if [[ ! -d "${THEOS}/sdks/iPhoneOS${SDK_VERSION}.sdk" ]]; then
             git clone -n --depth=1 --filter=tree:0 https://github.com/theos/sdks/ sdks
@@ -116,6 +141,7 @@ jobs:
           SDK_VERSION: ${{ inputs.sdk_version }}
 
       - name: Get Tweak Info
+        if: steps.claim.outputs.winner == 'true'
         id: tweak_info
         run: |
           TWEAK_NAME=$(sed -n 's/^Name: *//p' main/control)
@@ -125,7 +151,7 @@ jobs:
           echo "$TWEAK_NAME $TWEAK_VERSION"
 
       - name: Prepare X IPA
-        if: inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore'
+        if: steps.claim.outputs.winner == 'true' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore')
         id: x_version
         run: |
           wget "$IPA_URL" --no-verbose -O main/packages/com.atebits.Tweetie2.ipa
@@ -138,18 +164,20 @@ jobs:
           IPA_URL: ${{ inputs.decrypted_ipa_url }}
 
       - name: Prepare Image Pack
-        if: inputs.resource_pack_url != '' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore')
+        if: steps.claim.outputs.winner == 'true' && (inputs.resource_pack_url != '' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore'))
         run: |
           wget "$IMAGE_URL" --no-verbose -O main/resource-pack.zip
         env:
           IMAGE_URL: ${{ inputs.resource_pack_url }}
 
       - name: Compute ffmpeg Cache Key
+        if: steps.claim.outputs.winner == 'true'
         id: ffmpeg-key
         run: |
-          echo "key=ffmpeg-stack-sdk$(xcrun --sdk iphoneos --show-sdk-version)-$(git -C main rev-parse --short HEAD:deps/ffmpeg-kit-next/upstream)-${{ hashFiles('main/deps/ffmpeg-kit-next/build-ffmpeg.sh') }}" >> "$GITHUB_OUTPUT"
+          echo "key=ffmpeg-stack-${{ runner.arch }}-sdk$(xcrun --sdk iphoneos --show-sdk-version)-$(git -C main rev-parse --short HEAD:deps/ffmpeg-kit-next/upstream)-${{ hashFiles('main/deps/ffmpeg-kit-next/build-ffmpeg.sh') }}" >> "$GITHUB_OUTPUT"
 
       - name: ffmpeg Stack Caching
+        if: steps.claim.outputs.winner == 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -158,6 +186,7 @@ jobs:
           key: ${{ steps.ffmpeg-key.outputs.key }}
 
       - name: Build Package
+        if: steps.claim.outputs.winner == 'true'
         run: |
           cd ${{ github.workspace }}/main
           for makefile in Makefile deps/flex/Makefile deps/CallessKit/Makefile deps/zxPluginsInject/upstream/Makefile; do
@@ -174,7 +203,7 @@ jobs:
           TARGET_VERSION: ${{ inputs.target_version }}
 
       - name: Rebrand IPA
-        if: (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore') && (inputs.twitter_branding || inputs.resource_pack_url != '')
+        if: steps.claim.outputs.winner == 'true' && ((inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore') && (inputs.twitter_branding || inputs.resource_pack_url != ''))
         run: |
           cd ${{ github.workspace }}/main
           IMAGE_FLAG=""
@@ -183,7 +212,7 @@ jobs:
             "packages/$(ls -t packages | head -n1)"
 
       - name: Rename IPA to include IPA version
-        if: inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore'
+        if: steps.claim.outputs.winner == 'true' && (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore')
         run: |
           mv "main/packages/$(ls -t main/packages | head -n1)" \
              "main/packages/${{ steps.tweak_info.outputs.name }}-${BRANDING}-${{ inputs.deploy_format }}_${{ steps.tweak_info.outputs.version }}_${{ steps.x_version.outputs.version }}.${IPA_EXT}"
@@ -192,12 +221,13 @@ jobs:
           BRANDING: ${{ inputs.twitter_branding && 'Twitter' || 'X' }}
 
       - name: Pass package name
+        if: steps.claim.outputs.winner == 'true'
         id: package_name
         run: |
           echo "package=$(ls -t main/packages | head -n1)" >> "$GITHUB_OUTPUT"
 
       - name: Upload Artifact
-        if: ${{ inputs.upload_artifact }}
+        if: steps.claim.outputs.winner == 'true' && (inputs.upload_artifact)
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.tweak_info.outputs.name }}_${{ steps.tweak_info.outputs.version }}
@@ -206,7 +236,7 @@ jobs:
           if-no-files-found: error
 
       - name: Create Draft Release
-        if: ${{ inputs.create_release }}
+        if: steps.claim.outputs.winner == 'true' && (inputs.create_release)
         id: create_release
         uses: softprops/action-gh-release@v3
         env:
@@ -216,3 +246,21 @@ jobs:
           name: v${{ steps.tweak_info.outputs.version }} - ${{ steps.tweak_info.outputs.name }}
           files: main/packages/${{ steps.package_name.outputs.package }}
           draft: true
+
+  cleanup:
+    name: Remove temporary runner claim
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const ref = `heads/ci-runner-race/${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
+            try {
+              await github.rest.git.deleteRef({ ...context.repo, ref });
+            } catch (error) {
+              if (error.status !== 422 || !/reference does not exist/i.test(error.message)) throw error;
+            }
