@@ -26,6 +26,26 @@ jobs:
           script: |
             const raceId = `${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
             const branch = context.ref.replace(/^refs\/heads\//, '');
+            const { data: oldRuns } = await github.rest.actions.listWorkflowRuns({
+              ...context.repo,
+              workflow_id: 'runner-race-candidate.yml',
+              branch,
+              event: 'workflow_dispatch',
+              per_page: 100
+            });
+            for (const run of oldRuns.workflow_runs) {
+              if (!run.display_title.startsWith('RR-') || run.status === 'completed') continue;
+              const parentId = Number(run.display_title.split('-')[1]);
+              if (!Number.isFinite(parentId) || parentId === context.runId) continue;
+              const { data: parent } = await github.rest.actions.getWorkflowRun({
+                ...context.repo,
+                run_id: parentId
+              });
+              if (parent.status === 'completed' && parent.conclusion === 'cancelled') {
+                core.info(`Cancelling orphaned candidate ${run.display_title}.`);
+                await github.rest.actions.cancelWorkflowRun({ ...context.repo, run_id: run.id });
+              }
+            }
             const runners = ['macos-26', 'macos-26-intel', 'xcode-27'];
             await Promise.all(runners.map(runner =>
               github.rest.actions.createWorkflowDispatch({
@@ -63,6 +83,28 @@ jobs:
               await new Promise(resolve => setTimeout(resolve, 10000));
             }
             core.setFailed('Timed out waiting for the winning runner workflow.');
+
+      - name: Cancel candidate runs if coordinator stops
+        if: always() && (cancelled() || failure())
+        uses: actions/github-script@v8
+        env:
+          RACE_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        with:
+          script: |
+            const prefix = `RR-${process.env.RACE_ID}-`;
+            const branch = context.ref.replace(/^refs\\/heads\\//, '');
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              ...context.repo,
+              workflow_id: 'runner-race-candidate.yml',
+              branch,
+              event: 'workflow_dispatch',
+              per_page: 100
+            });
+            for (const run of data.workflow_runs) {
+              if (run.display_title.startsWith(prefix) && run.status !== 'completed') {
+                await github.rest.actions.cancelWorkflowRun({ ...context.repo, run_id: run.id });
+              }
+            }
 
   pull-request-tests:
     if: github.event_name == 'pull_request'
