@@ -5,7 +5,7 @@ on:
     inputs:
       sdk_version:
         description: "iOS SDK Version"
-        default: "16.5"
+        default: "26.5"
         required: true
         type: string
       target_version:
@@ -101,16 +101,19 @@ jobs:
           key: ${{ env.cache-name }}
           restore-keys: ${{ env.cache-name }}
 
-      - name: Download iOS SDK
-        if: steps.SDK.outputs.cache-hit != 'true'
+      - name: Ensure iOS SDK is installed
         run: |
-          git clone -n --depth=1 --filter=tree:0 https://github.com/theos/sdks/
-          cd sdks
-          git sparse-checkout set --no-cone iPhoneOS${{ inputs.sdk_version }}.sdk
-          git checkout
-          mv ./*.sdk "${THEOS}/sdks"
+          if [[ ! -d "${THEOS}/sdks/iPhoneOS${SDK_VERSION}.sdk" ]]; then
+            git clone -n --depth=1 --filter=tree:0 https://github.com/theos/sdks/ sdks
+            cd sdks
+            git sparse-checkout set --no-cone "iPhoneOS${SDK_VERSION}.sdk"
+            git checkout
+            mkdir -p "${THEOS}/sdks"
+            mv "iPhoneOS${SDK_VERSION}.sdk" "${THEOS}/sdks/"
+          fi
         env:
           THEOS: ${{ github.workspace }}/theos
+          SDK_VERSION: ${{ inputs.sdk_version }}
 
       - name: Get Tweak Info
         id: tweak_info
@@ -157,11 +160,18 @@ jobs:
       - name: Build Package
         run: |
           cd ${{ github.workspace }}/main
-          sed -i '' "s/^TARGET.*$/TARGET := iphone:clang:${{ inputs.sdk_version }}:${{ inputs.target_version }}/" Makefile
+          for makefile in Makefile deps/flex/Makefile deps/CallessKit/Makefile deps/zxPluginsInject/upstream/Makefile; do
+            if [[ -f "$makefile" ]]; then
+              sed -i '' -E "s/^(TARGET[[:space:]]*:?=[[:space:]]*iphone:clang:)[^:]+:/\\1${SDK_VERSION}:/" "$makefile"
+            fi
+          done
+          sed -i '' "s/^TARGET.*$/TARGET := iphone:clang:${SDK_VERSION}:${TARGET_VERSION}/" Makefile
           ./build.sh --${{ inputs.deploy_format }}
         env:
           THEOS: ${{ github.workspace }}/theos
           BUILD_DIR: ${{ github.workspace }}/ffmpeg-build
+          SDK_VERSION: ${{ inputs.sdk_version }}
+          TARGET_VERSION: ${{ inputs.target_version }}
 
       - name: Rebrand IPA
         if: (inputs.deploy_format == 'sideloaded' || inputs.deploy_format == 'trollstore') && (inputs.twitter_branding || inputs.resource_pack_url != '')
